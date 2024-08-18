@@ -1,0 +1,236 @@
+#!/bin/bash
+
+# Define your services here
+SERVICES=("manticore-ipfs" "manticore-explorer")
+
+# Define your service folders and their corresponding GitHub repositories here
+declare -A SERVICE_FOLDERS
+SERVICE_FOLDERS=(
+    ["manticore_ipfs"]="https://github.com/ManticoreTechnologies/manticore-ipfs.git"
+    ["manticore_explorer"]="https://github.com/ManticoreTechnologies/manticore-explorer.git"
+)
+
+# Define default configuration content
+DEFAULT_CONFIG_CONTENT="[General]
+log_level = DEBUG
+ip = 0.0.0.0
+port = 666
+
+[Logging]
+log_file = manticore_explorer.log
+
+[Permission]
+user = root
+group = root
+
+[Node]
+host = 127.0.0.1
+port = 8819
+user = user
+password = user
+
+[SSL]
+enabled = false
+keyfile = /home/ssl/key.pem
+certfile = /home/ssl/fullchain.pem"
+
+# Get the directory where the script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Function to check the status of a service
+check_status() {
+    for service in "${SERVICES[@]}"; do
+        FOLDER_PATH="$SCRIPT_DIR/${service//-/_}"
+        CONF_PATH="/usr/local/bin/${service//-/_}.conf"
+        
+        # Check if the service is installed
+        if [ -d "$FOLDER_PATH" ] && [ -f "$CONF_PATH" ]; then
+            echo "$service is installed."
+
+            # Check if the service is running
+            systemctl is-active --quiet "$service"
+            if [ $? -eq 0 ]; then
+                echo "$service is running."
+            else
+                echo "$service is not running."
+            fi
+        else
+            echo "$service is not installed."
+        fi
+    done
+}
+
+# Function to start services
+start_services() {
+    for service in "${SERVICES[@]}"; do
+        echo "Starting $service..."
+        sudo systemctl start "$service"
+        echo "Starting ${service}-daemon..."
+        sudo systemctl start "${service}-daemon"
+    done
+}
+
+# Function to stop services
+stop_services() {
+    for service in "${SERVICES[@]}"; do
+        echo "Stopping ${service}-daemon..."
+        sudo systemctl stop "${service}-daemon"
+        echo "Stopping $service..."
+        sudo systemctl stop "$service"
+    done
+}
+
+# Function to restart services
+restart_services() {
+    for service in "${SERVICES[@]}"; do
+        echo "Restarting ${service}-daemon..."
+        sudo systemctl restart "${service}-daemon"
+        echo "Restarting $service..."
+        sudo systemctl restart "$service"
+    done
+}
+
+# Function to install services
+install_services() {
+    for main_folder in "${!SERVICE_FOLDERS[@]}"; do
+        # Determine the folder path relative to the script's location
+        FOLDER_PATH="$SCRIPT_DIR/$main_folder"
+        
+        # Clone the repository if the folder doesn't exist
+        if [ ! -d "$FOLDER_PATH" ]; then
+            echo "Folder $FOLDER_PATH does not exist. Cloning from GitHub..."
+            git clone "${SERVICE_FOLDERS[$main_folder]}" "$FOLDER_PATH"
+        fi
+        
+        # Navigate into the folder and run the installation commands
+        if [ -d "$FOLDER_PATH" ]; then
+            echo "Installing services in $FOLDER_PATH..."
+            cd "$FOLDER_PATH" || exit
+            python3 manage_download_service.py install
+            python3 manage_flask_service.py install
+            cd "$SCRIPT_DIR" || exit
+        else
+            echo "Failed to clone or access $FOLDER_PATH!"
+        fi
+
+        # Create default configuration file if it doesn't exist
+        CONF_PATH="/usr/local/bin/${main_folder}.conf"
+        if [ ! -f "$CONF_PATH" ]; then
+            echo "Creating default configuration at $CONF_PATH..."
+            echo "$DEFAULT_CONFIG_CONTENT" | sudo tee "$CONF_PATH" > /dev/null
+        fi
+    done
+}
+
+# Function to uninstall services
+uninstall_services() {
+    for main_folder in "${!SERVICE_FOLDERS[@]}"; do
+        # Stop the services
+        for service in "${SERVICES[@]}"; do
+            echo "Stopping ${service}-daemon..."
+            sudo systemctl stop "${service}-daemon"
+            sudo systemctl disable "${service}-daemon"
+            echo "Stopping $service..."
+            sudo systemctl stop "$service"
+            sudo systemctl disable "$service"
+        done
+
+        # Remove the service folder
+        FOLDER_PATH="$SCRIPT_DIR/$main_folder"
+        if [ -d "$FOLDER_PATH" ]; then
+            echo "Removing folder $FOLDER_PATH..."
+            rm -rf "$FOLDER_PATH"
+        fi
+
+        # Remove the configuration file
+        CONF_PATH="/usr/local/bin/${main_folder}.conf"
+        if [ -f "$CONF_PATH" ]; then
+            echo "Removing configuration file $CONF_PATH..."
+            sudo rm "$CONF_PATH"
+        fi
+    done
+
+    # Optionally remove the systemd service files
+    for service in "${SERVICES[@]}"; do
+        SYSTEMD_FILE="/etc/systemd/system/${service}.service"
+        SYSTEMD_DAEMON_FILE="/etc/systemd/system/${service}-daemon.service"
+        if [ -f "$SYSTEMD_FILE" ]; then
+            echo "Removing systemd service file $SYSTEMD_FILE..."
+            sudo rm "$SYSTEMD_FILE"
+        fi
+        if [ -f "$SYSTEMD_DAEMON_FILE" ]; then
+            echo "Removing systemd service file $SYSTEMD_DAEMON_FILE..."
+            sudo rm "$SYSTEMD_DAEMON_FILE"
+        fi
+    done
+
+    # Reload systemd daemon
+    echo "Reloading systemd daemon..."
+    sudo systemctl daemon-reload
+}
+
+# Function to update services
+update_services() {
+    for main_folder in "${!SERVICE_FOLDERS[@]}"; do
+        FOLDER_PATH="$SCRIPT_DIR/$main_folder"
+        
+        # Navigate into the service folder and pull the latest code
+        if [ -d "$FOLDER_PATH" ]; then
+            echo "Updating $main_folder..."
+            cd "$FOLDER_PATH" || exit
+            git pull
+            echo "Reinstalling services in $FOLDER_PATH..."
+            python3 manage_download_service.py install
+            python3 manage_flask_service.py install
+            cd "$SCRIPT_DIR" || exit
+        else
+            echo "Folder $FOLDER_PATH does not exist. Cannot update."
+        fi
+    done
+    
+    # Restart the services after update
+    restart_services
+}
+
+# Display usage help
+show_help() {
+    echo "Usage: $0 {status|start|stop|restart|install|uninstall|update}"
+    echo
+    echo "Commands:"
+    echo "  status    - Show the status of all managed services"
+    echo "  start     - Start all managed services and their daemons"
+    echo "  stop      - Stop all managed services and their daemons"
+    echo "  restart   - Restart all managed services and their daemons"
+    echo "  install   - Install services by running install scripts in each service folder"
+    echo "  uninstall - Uninstall services, remove folders and configurations"
+    echo "  update    - Update services by pulling latest code, reinstalling, and restarting"
+}
+
+# Main script logic
+case "$1" in
+    status)
+        check_status
+        ;;
+    start)
+        start_services
+        ;;
+    stop)
+        stop_services
+        ;;
+    restart)
+        restart_services
+        ;;
+    install)
+        install_services
+        ;;
+    uninstall)
+        uninstall_services
+        ;;
+    update)
+        update_services
+        ;;
+    *)
+        show_help
+        ;;
+esac
+
